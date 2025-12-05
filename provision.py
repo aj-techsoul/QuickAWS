@@ -339,15 +339,75 @@ def write_env_file(env: Dict[str,str]):
     os.chmod(ENVFILE, 0o600)
     log(f"Wrote {ENVFILE.name} (600)")
 
-def compose_up():
-    # prefer docker compose v2
+def run_docker_compose_action(action: str):
+    """
+    Run a docker-compose action (like 'pull || true' or 'up -d') with these fallbacks:
+      1) Try without sudo
+      2) If permission error, try in a newgrp docker subshell
+      3) If still failing, run with sudo
+    """
+    # determine compose command (prefer v2 plugin)
+    compose_cmd = None
     try:
-        run("docker compose pull || true", check=False)
-        run("docker compose up -d", check=True)
+        res = subprocess.run("docker compose version", shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if res.returncode == 0:
+            compose_cmd = "docker compose"
     except Exception:
-        # fallback to docker-compose binary
-        run("docker-compose pull || true", check=False)
-        run("docker-compose up -d", check=True)
+        pass
+    if not compose_cmd:
+        if shutil.which("docker-compose"):
+            compose_cmd = "docker-compose"
+        else:
+            # fallback to docker compose if plugin not present (will likely fail)
+            compose_cmd = "docker compose"
+
+    full_cmd = f"{compose_cmd} {action}"
+
+    # Try 1: run normally
+    try:
+        run(full_cmd, check=True)
+        return
+    except Exception as e1:
+        log(f"First attempt failed: {e1}")
+
+    # Try 2: run inside newgrp docker so group membership applies to command
+    try:
+        # Escape double quotes in command (safe-ish)
+        safe_cmd = full_cmd.replace('"', '\\"')
+        newgrp_cmd = f'newgrp docker -c "{safe_cmd}"'
+        run(newgrp_cmd, check=True)
+        return
+    except Exception as e2:
+        log(f"newgrp attempt failed: {e2}")
+
+    # Try 3: run with sudo
+    try:
+        run(f"sudo {full_cmd}", check=True)
+        return
+    except Exception as e3:
+        log(f"Sudo attempt failed: {e3}")
+        raise RuntimeError("All attempts to run docker compose failed. Check docker service and permissions.")
+
+def compose_up():
+    """
+    Bring up the compose stack with permission fallbacks.
+    Uses run_docker_compose_action() which tries normal -> newgrp -> sudo.
+    """
+    log("Attempting docker compose pull/up with permission fallbacks...")
+    try:
+        # pull (non-fatal)
+        run_docker_compose_action("pull || true")
+    except Exception as e:
+        log(f"Warning: pull failed: {e} (continuing to up)")
+
+    try:
+        # bring up
+        run_docker_compose_action("up -d")
+        log("docker compose up succeeded")
+    except Exception as e:
+        log(f"docker compose up failed after all fallbacks: {e}")
+        raise
+
 
 def public_ip() -> str:
     try:
