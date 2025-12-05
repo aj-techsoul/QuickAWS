@@ -47,7 +47,7 @@ Run this on your EC2 server:
 
 ```bash
 mkdir -p ~/app && \
-curl -L https://github.com/OWNER/QuickAWS/archive/refs/heads/main.tar.gz \
+curl -L https://github.com/aj-techsoul/QuickAWS/archive/refs/heads/main.tar.gz \
   | tar xz --strip-components=1 -C ~/app && \
 cd ~/app && chmod +x provision.py && python3 provision.py
 ```
