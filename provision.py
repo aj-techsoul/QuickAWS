@@ -352,9 +352,14 @@ volumes:
 # ---------- compose generator for php (with arch-specific DB UI) --------
 
 def generate_php_compose(arch: str) -> str:
-    db_ui_block = ''
+    """
+    Generate docker-compose YAML for the PHP stack.
+    Uses MyWebSQL on ARM, phpMyAdmin on x86_64.
+    No f-strings so ${VAR} stays literal.
+    """
+
     if arch == 'arm':
-        # MyWebSQL recommended for ARM (php-based UI)
+        # ARM → MyWebSQL (full UI, multi-arch safe)
         db_ui_block = '''  mywebsql:
     image: mywebsql/mywebsql:latest
     restart: unless-stopped
@@ -362,6 +367,7 @@ def generate_php_compose(arch: str) -> str:
       - "8080:80"
 '''
     else:
+        # x86 → phpMyAdmin
         db_ui_block = '''  phpmyadmin:
     image: phpmyadmin/phpmyadmin:latest
     restart: unless-stopped
@@ -372,7 +378,10 @@ def generate_php_compose(arch: str) -> str:
     ports:
       - "8080:80"
 '''
-    compose = f'''services:
+
+    # MAIN YAML BODY (NO f-string)
+    compose = (
+'''services:
   nginx:
     image: nginx:stable-alpine
     restart: unless-stopped
@@ -403,11 +412,16 @@ def generate_php_compose(arch: str) -> str:
     volumes:
       - db_data:/var/lib/mysql
 
-{db_ui_block}
+'''
+    + db_ui_block +
+'''
 volumes:
   db_data:
 '''
+    )
+
     return compose
+
 
 # ----------------------- file creation helpers --------------------------
 
