@@ -51,7 +51,7 @@ curl -L https://github.com/aj-techsoul/QuickAWS/archive/refs/heads/main.tar.gz \
   | tar xz --strip-components=1 -C ~/app && \
 cd ~/app && chmod +x provision.py && python3 provision.py
 ```
-Replace OWNER with your GitHub username or organization. // Please fork this repo, for future use.
+Replace "aj-techsoul" with your GitHub username or organization. if you fork this repo, for future use.
 
 🔒 Quick Installation (Private Repo)
 ``` bash
