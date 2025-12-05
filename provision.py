@@ -1,75 +1,96 @@
-# from ~/app
-cd ~/app
-
-# backup old script
-cp provision.py provision.py.bak.$(date +%s)
-echo "Backed up old provision.py -> provision.py.bak.*"
-
-# write new robust provision.py
-cat > provision.py <<'PY'
 #!/usr/bin/env python3
 """
-Robust QuickAWS provisioner (verbose). Writes logs to ./provision.log.
-Replaces previous provision.py with better auto-detect and main invocation.
+QuickAWS provision.py
+A robust, verbose provisioner:
+- detects OS/arch
+- installs Docker + Docker Compose (best effort)
+- generates strong passwords and .env
+- writes docker-compose.yml from templates
+- places index.php into www/
+- starts docker compose
+- writes README_SECURE.txt (chmod 600)
+- logs to provision.log
+
+Usage:
+  python3 provision.py                 # interactive
+  NONINTERACTIVE=1 PROFILE=php python3 provision.py   # non-interactive
 """
-import os, sys, time, json, secrets, string, subprocess
+from __future__ import annotations
+import os
+import sys
+import time
+import json
+import secrets
+import string
+import shutil
+import subprocess
 from pathlib import Path
+from typing import Dict
 
 ROOT = Path(__file__).resolve().parent
-LOG = ROOT / "provision.log"
-ENV_FILE = ROOT / ".env"
-README = ROOT / "README_SECURE.txt"
+LOGFILE = ROOT / "provision.log"
+ENVFILE = ROOT / ".env"
+README_SECURE = ROOT / "README_SECURE.txt"
+WWW_DIR = ROOT / "www"
+PHP_DIR = ROOT / "php"
+NGINX_CONF_DIR = ROOT / "nginx" / "conf.d"
+COMPOSE_FILE = ROOT / "docker-compose.yml"
 
-def log(msg):
-    line = f"{time.asctime()}  {msg}"
+# Simple logger that appends to LOGFILE and prints to stdout
+def log(msg: str):
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{ts} {msg}"
     print(line)
-    with open(LOG, "a") as f:
-        f.write(line + "\\n")
+    try:
+        with open(LOGFILE, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
-def run(cmd, check=True):
+def run(cmd: str, check=True, env=None):
     log(f"> {cmd}")
-    res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    out = res.stdout or ""
-    if out.strip():
-        for L in out.splitlines():
-            log("  " + L)
+    res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+    if res.stdout:
+        for l in res.stdout.splitlines():
+            log("  " + l)
     if check and res.returncode != 0:
-        log(f"Command failed: {cmd} (exit {res.returncode})")
-        raise SystemExit(f"Command failed: {cmd}")
+        raise RuntimeError(f"Command failed: {cmd} (exit {res.returncode})")
+    return res
 
-def shutil_which(name):
-    from shutil import which
-    return which(name)
+def which(binname: str) -> bool:
+    return shutil.which(binname) is not None
 
-def detect_os():
-    os_release = {}
+def detect_os() -> Dict[str,str]:
+    data = {"ID": "", "NAME": "", "VERSION_ID": "", "ARCH": os.uname().machine}
     if Path("/etc/os-release").exists():
-        for line in open("/etc/os-release"):
+        for line in open("/etc/os-release", "r"):
             if "=" in line:
-                k,v = line.strip().split("=",1)
-                os_release[k] = v.strip().strip('"')
-    distro = os_release.get("ID","").lower()
-    name = os_release.get("NAME","")
-    version = os_release.get("VERSION_ID","")
-    arch = os.uname().machine
-    return distro, name, version, arch
+                k,v = line.strip().split("=", 1)
+                data[k] = v.strip().strip('"')
+    return data
 
 def ensure_docker_installed():
-    """Best-effort docker + compose installer. Idempotent."""
-    if shutil_which("docker"):
-        log("Docker already present.")
+    # Idempotent: if docker exists, skip install (but still ensure compose)
+    if which("docker"):
+        log("Docker binary already installed.")
     else:
-        distro, name, version, arch = detect_os()
-        log(f"Detected: distro={distro!r} name={name!r} version={version!r} arch={arch!r}")
+        osinfo = detect_os()
+        distro = (osinfo.get("ID") or "").lower()
+        name = (osinfo.get("NAME") or "").lower()
+        version = (osinfo.get("VERSION_ID") or "")
+        arch = osinfo.get("ARCH")
+        log(f"Detected OS: ID={distro} NAME={name} VERSION={version} ARCH={arch}")
+
         try:
             if "amazon" in distro and str(version).startswith("2023"):
+                # Amazon Linux 2023
                 run("sudo dnf -y update")
                 run("sudo dnf -y install docker")
                 run("sudo systemctl enable --now docker")
-            elif "amzn" in distro or "amazon" in name.lower() or "amazon" in distro:
-                # Amazon Linux 2 / older path
+            elif "amzn" in distro or "amazon" in name:
+                # Amazon Linux 2 (amazon-linux-extras may exist)
                 try:
-                    run("sudo amazon-linux-extras enable docker || true")
+                    run("sudo amazon-linux-extras enable docker || true", check=False)
                 except Exception:
                     log("amazon-linux-extras not available")
                 run("sudo yum -y update")
@@ -85,76 +106,83 @@ def ensure_docker_installed():
                 run("sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin")
                 run("sudo systemctl enable --now docker")
             else:
-                # fallback
-                if shutil_which("dnf"):
+                # Best-effort fallback: try common package managers
+                if which("dnf"):
                     run("sudo dnf -y update")
                     run("sudo dnf -y install docker || true")
                     run("sudo systemctl enable --now docker")
-                elif shutil_which("yum"):
+                elif which("yum"):
                     run("sudo yum -y update")
                     run("sudo yum -y install -y docker || true")
                     run("sudo systemctl enable --now docker")
-                elif shutil_which("apt-get"):
+                elif which("apt-get"):
                     run("sudo apt-get update -y")
                     run("sudo apt-get install -y docker.io || true")
                     run("sudo systemctl enable --now docker")
                 else:
-                    raise SystemExit("No package manager found to install Docker. Install manually.")
+                    raise RuntimeError("No supported package manager found to install Docker; please install Docker manually.")
         except Exception as e:
-            log(f"Docker install error: {e}")
+            log(f"ERROR installing Docker: {e}")
             raise
 
-    # allow ec2-user or current user to run docker
+    # Allow current user to use docker (ec2-user or detected user)
     try:
-        user = os.environ.get("USER") or os.environ.get("LOGNAME") or os.getlogin()
+        current_user = os.environ.get("USER") or os.environ.get("LOGNAME") or os.getlogin()
     except Exception:
-        user = "ec2-user"
-    log(f"Adding {user} to docker group")
-    run(f"sudo usermod -aG docker {user} || true", check=False)
+        current_user = "ec2-user"
+    log(f"Adding user '{current_user}' to docker group (sudo usermod -aG docker {current_user})")
+    try:
+        run(f"sudo usermod -aG docker {current_user}", check=False)
+    except Exception:
+        log("usermod may have failed or already set; continuing")
 
-    # ensure docker compose present
+    # Install docker compose if needed
     compose_ok = False
     try:
-        res = subprocess.run("docker compose version", shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        res = subprocess.run("docker compose version", shell=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         if res.returncode == 0:
             compose_ok = True
-            log("docker compose v2 plugin available")
+            log("Docker Compose v2 plugin available.")
     except Exception:
         pass
-    if not compose_ok and shutil_which("docker-compose"):
+
+    if not compose_ok and which("docker-compose"):
         compose_ok = True
-        log("docker-compose binary exists")
+        log("docker-compose binary present.")
 
     if not compose_ok:
-        # try to install plugin via package manager
-        if shutil_which("dnf"):
+        # try distro packages (best-effort)
+        if which("dnf"):
             run("sudo dnf -y install docker-compose-plugin || true", check=False)
-        if shutil_which("yum"):
+        if which("yum"):
             run("sudo yum -y install docker-compose-plugin || true", check=False)
-        if shutil_which("apt-get"):
+        if which("apt-get"):
             run("sudo apt-get install -y docker-compose-plugin || true", check=False)
 
     if not compose_ok:
         arch = os.uname().machine
         if arch == "aarch64":
-            binurl = "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-aarch64"
+            url = "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-aarch64"
         else:
-            binurl = "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
-        run(f"sudo curl -L {binurl} -o /usr/local/bin/docker-compose")
+            url = "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
+        run(f"sudo curl -L {url} -o /usr/local/bin/docker-compose")
         run("sudo chmod +x /usr/local/bin/docker-compose")
+        log("Installed standalone docker-compose binary to /usr/local/bin/docker-compose")
 
-    # quick checks
-    run("docker --version", check=False)
-    run("docker compose version || docker-compose --version", check=False)
+    # small wait to let docker come up
     time.sleep(1)
+    try:
+        run("docker --version", check=False)
+    except Exception:
+        log("Warning: docker --version failed; docker may need restart or login session refresh")
 
-def generate_password(n=18):
+def randpass(n: int = 20) -> str:
     alphabet = string.ascii_letters + string.digits + "-_!@"
     return ''.join(secrets.choice(alphabet) for _ in range(n))
 
-# templates (small)
-TEMPLATES = {
- "static": """version: "3.8"
+# Minimal docker-compose templates (small and resource-friendly)
+COMPOSE_TEMPLATES = {
+    "static": """version: "3.8"
 services:
   nginx:
     image: nginx:stable-alpine
@@ -164,7 +192,7 @@ services:
     ports:
       - "80:80"
 """,
- "php": """version: "3.8"
+    "php": """version: "3.8"
 services:
   nginx:
     image: nginx:stable-alpine
@@ -176,6 +204,7 @@ services:
       - "80:80"
     depends_on:
       - php
+
   php:
     build: ./php
     restart: unless-stopped
@@ -183,6 +212,7 @@ services:
       - ./www:/var/www/html
     depends_on:
       - db
+
   db:
     image: mariadb:10.5
     restart: unless-stopped
@@ -193,6 +223,7 @@ services:
       MYSQL_PASSWORD: "${MYSQL_PASSWORD}"
     volumes:
       - db_data:/var/lib/mysql
+
   phpmyadmin:
     image: phpmyadmin/phpmyadmin
     environment:
@@ -201,143 +232,228 @@ services:
       PMA_PASSWORD: "${MYSQL_ROOT_PASSWORD}"
     ports:
       - "8080:80"
+
 volumes:
   db_data:
+""",
+    "node": """version: "3.8"
+services:
+  app:
+    image: node:18-alpine
+    working_dir: /usr/src/app
+    volumes:
+      - ./www:/usr/src/app
+    command: sh -c "npm install || true && npm start"
+    ports:
+      - "3000:3000"
+""",
+    "django": """version: "3.8"
+services:
+  web:
+    image: python:3.11-alpine
+    working_dir: /app
+    volumes:
+      - ./www:/app
+    command: sh -c "pip install -r requirements.txt || true && gunicorn project.wsgi:application --bind 0.0.0.0:8000"
+    ports:
+      - "8000:8000"
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: appdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+""",
+    # Mail server template is intentionally minimal; recommend SES for production
+    "mail": """version: "3.8"
+services:
+  mailserver:
+    image: docker.io/mailserver/docker-mailserver:latest
+    hostname: mail
+    domainname: example.com
+    env_file: .env
+    ports:
+      - "25:25"
+      - "587:587"
+      - "993:993"
+    volumes:
+      - maildata:/var/mail
+      - mailstate:/var/mail-state
+      - ./config/:/tmp/docker-mailserver/
+volumes:
+  maildata:
+  mailstate:
 """
 }
 
-def create_compose(profile):
-    tpl = TEMPLATES.get(profile)
+def write_compose(profile: str):
+    tpl = COMPOSE_TEMPLATES.get(profile)
     if not tpl:
-        raise SystemExit("Unknown profile: " + profile)
-    (ROOT / "docker-compose.yml").write_text(tpl)
-    log("Wrote docker-compose.yml")
+        raise RuntimeError(f"No compose template for profile {profile}")
+    COMPOSE_FILE.write_text(tpl)
+    log(f"Wrote {COMPOSE_FILE.name} for profile {profile}")
 
-def write_env(envd):
-    lines = [f"{k}={v}" for k,v in envd.items()]
-    ENV_FILE.write_text("\\n".join(lines) + "\\n")
-    os.chmod(ENV_FILE, 0o600)
-    log(f"Wrote {ENV_FILE} (600)")
+def ensure_dirs(profile: str):
+    WWW_DIR.mkdir(exist_ok=True)
+    if profile == "php":
+        PHP_DIR.mkdir(exist_ok=True)
+        NGINX_CONF_DIR.mkdir(parents=True, exist_ok=True)
 
 def place_index():
-    (ROOT / "www").mkdir(exist_ok=True)
     src = ROOT / "index.php"
-    dst = ROOT / "www" / "index.php"
+    dst = WWW_DIR / "index.php"
     if src.exists():
         dst.write_text(src.read_text())
         os.chmod(dst, 0o644)
         log("Placed index.php into www/")
     else:
-        log("No index.php in repo root to place")
+        log("No index.php in repo root to place into www/")
 
 def create_php_files():
-    # minimal php Dockerfile + nginx conf
-    phpdir = ROOT / "php"
-    nginxconf = ROOT / "nginx" / "conf.d"
-    phpdir.mkdir(exist_ok=True)
-    nginxconf.mkdir(parents=True, exist_ok=True)
-    (phpdir / "Dockerfile").write_text("FROM php:8.1-fpm-alpine\\nWORKDIR /var/www/html\\nCOPY ./www /var/www/html\\n")
-    (nginxconf / "default.conf").write_text("""server {
+    # minimal PHP Dockerfile and nginx conf tailored for low-memory hosts
+    dockerfile = """FROM php:8.1-fpm-alpine
+WORKDIR /var/www/html
+COPY ./www /var/www/html
+"""
+    (PHP_DIR / "Dockerfile").write_text(dockerfile)
+    nginx_conf = """server {
     listen 80;
     server_name _;
     root /var/www/html;
     index index.php index.html;
     location / { try_files $uri $uri/ /index.php?$query_string; }
     location ~ \\.php$ { fastcgi_pass php:9000; include fastcgi_params; fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; }
-}""")
-    log("Created php Dockerfile and nginx conf")
+}"""
+    (NGINX_CONF_DIR / "default.conf").write_text(nginx_conf)
+    log("Wrote PHP Dockerfile and nginx default.conf")
 
-def bring_up():
+def write_env_file(env: Dict[str,str]):
+    lines = [f"{k}={v}" for k,v in env.items()]
+    ENVFILE.write_text("\n".join(lines) + "\n")
+    os.chmod(ENVFILE, 0o600)
+    log(f"Wrote {ENVFILE.name} (600)")
+
+def compose_up():
     # prefer docker compose v2
     try:
         run("docker compose pull || true", check=False)
         run("docker compose up -d", check=True)
     except Exception:
+        # fallback to docker-compose binary
         run("docker-compose pull || true", check=False)
         run("docker-compose up -d", check=True)
 
-def write_readme(info):
+def public_ip() -> str:
+    try:
+        # quick external IP fetch; non-blocking
+        out = subprocess.run("curl -sS https://ifconfig.co/ip", shell=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
+        ip = out.stdout.strip()
+        if ip:
+            return ip
+    except Exception:
+        pass
+    return "UNKNOWN"
+
+def write_readme(info: Dict):
     parts = []
-    parts.append("PROVISION SUMMARY")
-    parts.append("Time: " + time.asctime())
-    parts.append("Public IP: " + info.get("public_ip","UNKNOWN"))
-    parts.append("Hostname: " + info.get("hostname","UNKNOWN"))
+    parts.append("=== QUICKAWS PROVISION SUMMARY ===")
+    parts.append(f"Time: {time.asctime()}")
+    parts.append(f"Public IP: {info.get('public_ip','UNKNOWN')}")
+    parts.append(f"Hostname: {info.get('hostname','UNKNOWN')}")
     parts.append("")
-    parts.append("Credentials:")
+    parts.append("Generated credentials (store securely):")
     parts.append(json.dumps(info.get("secrets",{}), indent=2))
     parts.append("")
     parts.append("Ports:")
-    for p in info.get("ports",[]):
+    for p in info.get("ports", []):
         parts.append(" - " + p)
     parts.append("")
-    parts.append("Notes: README_SECURE.txt is chmod 600, download via SSH only.")
-    README.write_text("\\n".join(parts))
-    os.chmod(README, 0o600)
-    log(f"Wrote {README} (600)")
+    parts.append("Notes: README_SECURE.txt is chmod 600. Download via SSH (scp) only.")
+    README_SECURE.write_text("\n".join(parts) + "\n")
+    os.chmod(README_SECURE, 0o600)
+    log(f"Wrote {README_SECURE.name} (600)")
 
-def public_ip():
-    try:
-        import urllib.request
-        return urllib.request.urlopen("https://ifconfig.co/ip", timeout=3).read().decode().strip()
-    except Exception:
-        return "UNKNOWN"
+def interactive_choice() -> str:
+    if os.environ.get("NONINTERACTIVE") == "1":
+        profile = os.environ.get("PROFILE", "php")
+        log(f"Running non-interactive with PROFILE={profile}")
+        return profile
+    # interactive
+    print("Choose server purpose:")
+    print(" 1. Static Web Server or Serverless")
+    print(" 2. Proper Web Server (MariaDB, phpMyAdmin, email opt.)")
+    print(" 3. NodeJS server")
+    print(" 4. Django based server")
+    print(" 5. Mailserver (advanced)")
+    choice = input("Select number (e.g. 2): ").strip()
+    map_ = {"1":"static","2":"php","3":"node","4":"django","5":"mail"}
+    return map_.get(choice, "php")
 
 def main():
-    log("Starting provision.py")
-    # interactive choice
-    if os.environ.get("NONINTERACTIVE") == "1":
-        profile = os.environ.get("PROFILE","php")
-        log(f"NONINTERACTIVE running profile={profile}")
-    else:
-        print("Choose server purpose:")
-        print(" 1. Static Web Server or Serverless")
-        print(" 2. Proper Web Server (MariaDB, phpMyAdmin, email opt.)")
-        print(" 3. NodeJS server")
-        print(" 4. Django based server")
-        print(" 5. Mailserver (advanced)")
-        choice = input("Select number (e.g. 2): ").strip()
-        map_ = {"1":"static","2":"php","3":"node","4":"django","5":"mail"}
-        profile = map_.get(choice,"php")
-        log(f"User selected profile={profile}")
+    log("=== QuickAWS provisioner starting ===")
+    # Choose profile
+    profile = interactive_choice()
+    log(f"Selected profile: {profile}")
 
-    # ensure docker
+    # install docker if needed
     try:
         ensure_docker_installed()
     except Exception as e:
-        log(f"Failed to ensure docker: {e}")
-        raise
+        log(f"Error installing docker: {e}")
+        log("Provisioner cannot continue without Docker. Exiting.")
+        sys.exit(1)
 
-    # generate secrets
-    envd = {}
-    envd["MYSQL_ROOT_PASSWORD"] = generate_password(18)
-    envd["MYSQL_PASSWORD"] = generate_password(16)
-    envd["MYSQL_USER"] = "appuser"
-    write_env(envd)
-
-    # create files based on profile
-    create_compose(profile)
+    # create directories and copy index
+    ensure_dirs(profile)
     place_index()
+
+    # create .env with credentials
+    secrets_map = {}
+    if profile == "php":
+        secrets_map["MYSQL_ROOT_PASSWORD"] = randpass(20)
+        secrets_map["MYSQL_PASSWORD"] = randpass(16)
+        secrets_map["MYSQL_USER"] = "appuser"
+    elif profile == "django":
+        secrets_map["POSTGRES_PASSWORD"] = randpass(18)
+    elif profile == "mail":
+        secrets_map["MAIL_ADMIN_PASS"] = randpass(20)
+    # write .env if any
+    if secrets_map:
+        write_env_file(secrets_map)
+
+    # create compose file
+    write_compose(profile)
+
+    # profile-specific files
     if profile == "php":
         create_php_files()
 
-    # start stack
+    # bring up containers
     try:
-        bring_up()
+        log("Bringing up docker-compose stack (may take a few minutes on first run)...")
+        compose_up()
     except Exception as e:
-        log(f"docker compose failed: {e}")
+        log(f"docker compose up failed: {e}")
 
-    info = {"public_ip": public_ip(), "hostname": os.uname().nodename, "secrets": {"ENV": envd}, "ports":["80->nginx","8080->phpmyadmin"]}
+    # produce README_SECURE
+    info = {
+        "public_ip": public_ip(),
+        "hostname": os.uname().nodename,
+        "secrets": secrets_map,
+        "ports": ["80 -> nginx", "8080 -> phpmyadmin (if present)"],
+    }
     write_readme(info)
-    log("Provisioning complete. README_SECURE.txt created.")
-    print("\\nProvision complete. README_SECURE.txt created at", README)
-    print("View logs:", LOG)
 
-if __name__ == '__main__':
+    log("Provisioning complete. Secure summary in README_SECURE.txt (600).")
+    print("\nProvision complete.")
+    print("Secure README:", README_SECURE)
+    print("Log file:", LOGFILE)
+
+if __name__ == "__main__":
     main()
-PY
-
-# make it executable
-chmod +x provision.py
-
-# run it (interactive)
-python3 -u provision.py 2>&1 | tee -a provision.log
