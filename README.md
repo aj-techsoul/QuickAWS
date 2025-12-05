@@ -50,7 +50,7 @@ mkdir -p ~/app && \
 curl -L https://github.com/OWNER/QuickAWS/archive/refs/heads/main.tar.gz \
   | tar xz --strip-components=1 -C ~/app && \
 cd ~/app && chmod +x provision.py && python3 provision.py
-
+```
 Replace OWNER with your GitHub username or organization. // Please fork this repo, for future use.
 
 🔒 Quick Installation (Private Repo)
@@ -62,7 +62,7 @@ curl -H "Authorization: token $GITHUB_PAT" \
   | tar xz --strip-components=1 -C ~/app && \
 unset GITHUB_PAT && \
 cd ~/app && chmod +x provision.py && python3 provision.py
-
+```
 🖥️ Interactive Provisioning
 
 When you run:
@@ -84,7 +84,7 @@ QuickAWS will then generate:
 docker-compose.yml
 service folders
 credentials
-
+```
 a protected summary file:
 README_SECURE.txt (chmod 600)
 
@@ -96,25 +96,25 @@ App credentials
 Ports & URLs
 Timestamp
 Server profile used
-
+```
 🔐 Security of README_SECURE.txt
 
 Stored at:
 ```bash
 /home/ec2-user/app/README_SECURE.txt
-
+```
 
 Protected with:
 ```bash
 chmod 600 README_SECURE.txt
-
+```
 
 It can only be retrieved over SSH or SCP.
 
 ⚙️ Non-Interactive Mode (Automated Fleet Provisioning)
 ```bash
 NONINTERACTIVE=1 PROFILE=php python3 provision.py
-
+```
 
 Available profiles:
 ```bash
@@ -123,21 +123,22 @@ php
 node
 django
 mail
-
+```
 
 Example for Node:
 ```bash
 NONINTERACTIVE=1 PROFILE=node python3 provision.py
-
+```
 🧹 Updating a Server
+```bash
 cd ~/app
 python3 provision.py
-
+```
 
 Or:
 ```bash
 NONINTERACTIVE=1 PROFILE=php python3 provision.py
-
+```
 🧰 Requirements
 
 Amazon Linux 2 / Amazon Linux 2023 / Ubuntu
@@ -155,7 +156,7 @@ Modular — easy to add new server profiles
 
 📜 License
 
-MIT (or modify as preferred)
+MIT
 
 ❤️ Credits
 
