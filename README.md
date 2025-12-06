@@ -51,7 +51,28 @@ curl -L https://github.com/aj-techsoul/QuickAWS/archive/refs/heads/main.tar.gz \
   | tar xz --strip-components=1 -C ~/app && \
 cd ~/app && chmod +x provision.py && python3 provision.py
 ```
+
+PHP stack (nginx + PHP + MariaDB + Adminer/phpMyAdmin)
+```bash
+mkdir -p ~/app && \
+curl -L https://github.com/aj-techsoul/QuickAWS/archive/refs/heads/main.tar.gz \
+  | tar xz --strip-components=1 -C ~/app && \
+cd ~/app && chmod +x provision.py && \
+NONINTERACTIVE=1 PROFILE=php python3 provision.py 2>&1 | tee provision_run.log
+```
+Static-only nginx (no PHP / DB)
+```bash
+mkdir -p ~/app && \
+curl -L https://github.com/aj-techsoul/QuickAWS/archive/refs/heads/main.tar.gz \
+  | tar xz --strip-components=1 -C ~/app && \
+cd ~/app && chmod +x provision.py && \
+NONINTERACTIVE=1 PROFILE=static python3 provision.py 2>&1 | tee provision_run.log
+```
+
 Replace "aj-techsoul" with your GitHub username or organization. if you fork this repo, for future use.
+
+
+
 
 🔒 Quick Installation (Private Repo)
 ``` bash
