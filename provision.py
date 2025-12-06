@@ -23,6 +23,7 @@ import subprocess
 import time
 import random
 import string
+from typing import Union
 from pathlib import Path
 import shutil
 import traceback
@@ -521,7 +522,7 @@ def generate_static_compose() -> str:
     return compose
 
 
-def write_file(path: str | Path, content: str, mode: int = 0o644):
+def write_file(path: Union[str, Path], content: str, mode: int = 0o644):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
