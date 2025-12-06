@@ -1,41 +1,22 @@
 #!/usr/bin/env python3
-"""
-QuickAWS provisioner – upgraded, progress + spinner, ARM-safe DB UI.
-
-Profiles:
-  - php    : nginx + php-fpm + MariaDB + Adminer/phpMyAdmin
-  - static : nginx only (static site)
-  - node   : not implemented yet (stub)
-  - django : not implemented yet (stub)
-  - mail   : not implemented yet (stub)
-
-Usage:
-  Interactive:
-    python3 provision.py
-
-  Non-interactive (CI / one-liner):
-    NONINTERACTIVE=1 PROFILE=php python3 provision.py
-"""
-
 import os
 import sys
 import subprocess
 import time
 import random
 import string
-from typing import Union
 from pathlib import Path
 import shutil
 import traceback
 import threading
 import itertools
+from typing import Union
+from contextlib import contextmanager
 
 LOGFILE = Path("provision.log")
 
 
-# ---------------------------------------------------------
-# Logging & helpers
-# ---------------------------------------------------------
+# ---------- Logging & helpers ----------
 
 def log(msg: str):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -49,7 +30,6 @@ def log(msg: str):
 
 
 def run(cmd: str, check: bool = True):
-    """Run a shell command, log output, optionally raise on error."""
     log(f"> {cmd}")
     res = subprocess.run(
         cmd,
@@ -73,7 +53,7 @@ def which(cmd: str):
     return _which(cmd)
 
 
-def safe_mkdir(path: str, mode: int = 0o755):
+def safe_mkdir(path: Union[str, Path], mode: int = 0o755):
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     try:
@@ -87,10 +67,6 @@ def random_pw(n: int = 20) -> str:
     return "".join(random.choice(alphabet) for _ in range(n))
 
 
-# ---------------------------------------------------------
-# Progress + spinner
-# ---------------------------------------------------------
-
 TOTAL_STEPS = 0
 CURRENT_STEP = 0
 
@@ -101,18 +77,8 @@ def set_total_steps(n: int):
     CURRENT_STEP = 0
 
 
-from contextlib import contextmanager
-
-
 @contextmanager
 def step(title: str):
-    """
-    High-level progress step.
-
-    Usage:
-        with step("Ensuring Docker installed"):
-            ensure_docker_installed()
-    """
     global CURRENT_STEP, TOTAL_STEPS
     CURRENT_STEP += 1
     if TOTAL_STEPS:
@@ -129,12 +95,6 @@ def step(title: str):
 
 
 def run_with_spinner(cmd: str, label: str = "", check: bool = True):
-    """
-    Run a shell command while showing a simple spinner in the terminal.
-
-    This does not replace run(), it is used for clearly long operations
-    (docker-compose up, etc.) to avoid looking "stuck".
-    """
     stop_event = threading.Event()
 
     def spinner():
@@ -145,7 +105,6 @@ def run_with_spinner(cmd: str, label: str = "", check: bool = True):
             sys.stdout.write("\r" + text + " " + next(it))
             sys.stdout.flush()
             time.sleep(0.15)
-        # clear line and show final
         sys.stdout.write("\r" + text + " ... done\n")
         sys.stdout.flush()
 
@@ -173,9 +132,7 @@ def run_with_spinner(cmd: str, label: str = "", check: bool = True):
         t.join()
 
 
-# ---------------------------------------------------------
-# OS / Docker install
-# ---------------------------------------------------------
+# ---------- OS / Docker setup ----------
 
 def detect_os_arch():
     os_release = {}
@@ -193,13 +150,9 @@ def detect_os_arch():
 
 
 def ensure_docker_installed():
-    """
-    Install Docker if missing. Idempotent.
-    Supports Amazon Linux 2/2023, Debian/Ubuntu, and generic yum/dnf/apt
-    heuristics. Also ensures a docker-compose binary is available.
-    """
     log("Checking Docker/Compose presence...")
 
+    # Docker
     if which("docker"):
         run("docker --version", check=False)
         log("Docker binary present.")
@@ -208,15 +161,11 @@ def ensure_docker_installed():
         distro = info["distro"]
         version = info["version"]
         log(f"Detected distro: {distro} version: {version} arch: {info['arch']}")
-
         try:
-            # Amazon Linux 2023
             if "amazon" in distro and version.startswith("2023"):
                 run("sudo dnf -y update")
                 run("sudo dnf -y install docker")
                 run("sudo systemctl enable --now docker")
-
-            # Amazon Linux 2
             elif "amzn" in distro or "amazon" in distro:
                 try:
                     run("sudo amazon-linux-extras enable docker || true", check=False)
@@ -225,22 +174,20 @@ def ensure_docker_installed():
                 run("sudo yum -y update")
                 run("sudo yum -y install -y docker || true")
                 run("sudo systemctl enable --now docker")
-
-            # Debian / Ubuntu
             elif any(x in distro for x in ("ubuntu", "debian", "raspbian", "pop")):
                 run("sudo apt-get update -y")
                 run("sudo apt-get install -y ca-certificates curl gnupg lsb-release")
                 run("sudo mkdir -p /etc/apt/keyrings")
                 run("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg")
-                run('echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] '
+                run(
+                    'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] '
                     'https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" '
-                    '| sudo tee /etc/apt/sources.list.d/docker.list > /dev/null')
+                    '| sudo tee /etc/apt/sources.list.d/docker.list > /dev/null'
+                )
                 run("sudo apt-get update -y")
                 run("sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin")
                 run("sudo systemctl enable --now docker")
-
             else:
-                # generic fallback
                 if which("dnf"):
                     run("sudo dnf -y update")
                     run("sudo dnf -y install docker || true")
@@ -259,18 +206,16 @@ def ensure_docker_installed():
             log("Docker installation encountered error: " + str(e))
             raise
 
-    # Add current user to docker group (best effort)
+    # docker group
     try:
         current_user = os.environ.get("USER") or os.environ.get("LOGNAME") or os.getlogin()
     except Exception:
         current_user = "ec2-user"
     log(f"Adding user {current_user} to docker group (if not already)")
     run(f"sudo usermod -aG docker {current_user} || true", check=False)
-
-    # Ensure docker service running
     run("sudo systemctl enable --now docker || true", check=False)
 
-    # Ensure docker-compose binary exists if plugin not available
+    # docker-compose
     compose_ok = False
     try:
         res = subprocess.run(
@@ -306,9 +251,7 @@ def ensure_docker_installed():
     time.sleep(1)
 
 
-# ---------------------------------------------------------
-# Compose generation
-# ---------------------------------------------------------
+# ---------- App config writers ----------
 
 def safe_write_dotenv(rootpw=None, userpw=None, user="appuser"):
     if not rootpw:
@@ -391,9 +334,6 @@ server {
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
     }
-
-    # Optional path if you put Adminer under /adminer in nginx,
-    # but by default Adminer is separate on 127.0.0.1:8080
 }
 """
     conf_path = conf_dir / "default.conf"
@@ -413,7 +353,7 @@ server {
     listen 80;
     server_name _;
 
-    root /var/www/html;
+    root /usr/share/nginx/html;
     index index.html index.htm;
 
     location / {
@@ -431,19 +371,10 @@ server {
 
 
 def generate_php_compose(arch: str) -> str:
-    """
-    Generate docker-compose YAML for PHP profile.
-
-    - nginx:stable-alpine
-    - php:8.1-fpm-alpine
-    - mariadb:10.5
-    - DB UI:
-        * Adminer on ARM (adminer:latest)
-        * phpMyAdmin on x86_64 (phpmyadmin/phpmyadmin:latest)
-    - DB UI bound to 127.0.0.1:8080 for safety.
-    """
     is_arm = arch and ("aarch64" in arch or arch.startswith("arm"))
+
     if is_arm:
+        # ARM-safe DB UI: Adminer, bound to localhost:8080
         db_ui_block = """  adminer:
     image: adminer:latest
     restart: unless-stopped
@@ -453,6 +384,7 @@ def generate_php_compose(arch: str) -> str:
       - "127.0.0.1:8080:8080"
 """
     else:
+        # x86: phpMyAdmin, bound to localhost:8080
         db_ui_block = """  phpmyadmin:
     image: phpmyadmin/phpmyadmin:latest
     restart: unless-stopped
@@ -474,7 +406,7 @@ def generate_php_compose(arch: str) -> str:
         "      - ./nginx/conf.d:/etc/nginx/conf.d:ro\n"
         "      - /etc/letsencrypt:/etc/letsencrypt:ro\n"
         "      - /etc/nginx/ssl:/etc/nginx/ssl:ro\n"
-        '    ports:\n'
+        "    ports:\n"
         '      - "80:80"\n'
         "    depends_on:\n"
         "      - php\n"
@@ -541,15 +473,6 @@ def validate_compose_yaml():
 
 
 def try_docker_compose_up():
-    """
-    Try docker-compose with fallbacks:
-
-      1) docker compose up -d
-      2) docker-compose up -d
-      3) sudo docker-compose up -d --remove-orphans --build
-
-    Uses spinner so the user sees ongoing activity.
-    """
     cmds = [
         ("docker compose up -d", "Starting containers (docker compose up -d)"),
         ("docker-compose up -d", "Starting containers (docker-compose up -d)"),
@@ -572,10 +495,6 @@ def try_docker_compose_up():
     return False
 
 
-# ---------------------------------------------------------
-# README_SECURE & profile selection
-# ---------------------------------------------------------
-
 def write_readme_secure(env_path=".env", out_path="README_SECURE.txt"):
     try:
         env = {}
@@ -586,7 +505,7 @@ def write_readme_secure(env_path=".env", out_path="README_SECURE.txt"):
                     k, v = line.split("=", 1)
                     env[k.strip()] = v.strip()
 
-        pubip = "UNKNOWN"
+        pubip = ""
         try:
             pubip = subprocess.check_output(
                 ["curl", "-sS", "http://169.254.169.254/latest/meta-data/public-ipv4"],
@@ -626,13 +545,9 @@ Notes:
         log("Failed to write README_SECURE.txt: " + str(e))
 
 
-def choose_profile() -> str:
-    """
-    Decide which profile to use.
+# ---------- Profile selection ----------
 
-    NONINTERACTIVE=1 PROFILE=php  -> "php"
-    Otherwise prompts the user.
-    """
+def choose_profile() -> str:
     noninteractive = os.environ.get("NONINTERACTIVE", "").lower() in ("1", "true", "yes")
     default_profile = os.environ.get("PROFILE", "php").lower()
 
@@ -642,6 +557,7 @@ def choose_profile() -> str:
         "3": "node",
         "4": "django",
         "5": "mail",
+        "6": "tls",
     }
 
     if noninteractive:
@@ -658,15 +574,173 @@ def choose_profile() -> str:
     print(" 3. NodeJS server (not implemented yet)")
     print(" 4. Django based server (not implemented yet)")
     print(" 5. Mailserver (advanced, not implemented yet)")
+    print(" 6. Configure domain + HTTPS for existing stack")
+
     choice = input("Select number (default 2): ").strip() or "2"
     profile = profiles.get(choice, "php")
     log(f"User selected profile={profile}")
     return profile
 
 
-# ---------------------------------------------------------
-# main()
-# ---------------------------------------------------------
+# ---------- TLS helper (Option 6) ----------
+
+def detect_stack_type_from_compose(compose_path: Union[str, Path] = "docker-compose.yml") -> str:
+    p = Path(compose_path)
+    if not p.exists():
+        raise RuntimeError("docker-compose.yml not found; cannot detect stack type.")
+    text = p.read_text()
+    for line in text.splitlines():
+        if line.strip().startswith("php:"):
+            return "php"
+    return "static"
+
+
+def generate_tls_nginx_conf(domain: str, php_stack: bool) -> str:
+    domain = domain.strip()
+    server_names = f"{domain} www.{domain}"
+
+    base_redirect = f"""
+server {{
+    listen 80;
+    server_name {server_names};
+    return 301 https://$host$request_uri;
+}}
+"""
+
+    if php_stack:
+        ssl_block = f"""
+server {{
+    listen 443 ssl;
+    server_name {server_names};
+
+    root /var/www/html;
+    index index.php index.html index.htm;
+
+    ssl_certificate /etc/letsencrypt/live/{domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    location / {{
+        try_files $uri $uri/ /index.php?$query_string;
+    }}
+
+    location ~ \.php$ {{
+        fastcgi_pass php:9000;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    }}
+}}
+"""
+    else:
+        ssl_block = f"""
+server {{
+    listen 443 ssl;
+    server_name {server_names};
+
+    root /usr/share/nginx/html;
+    index index.html index.htm;
+
+    ssl_certificate /etc/letsencrypt/live/{domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    location / {{
+        try_files $uri $uri/ =404;
+    }}
+}}
+"""
+
+    return base_redirect + "\n" + ssl_block
+
+
+def obtain_cert_with_docker(domain: str, email: str):
+    webroot = Path("www").absolute()
+    webroot.mkdir(parents=True, exist_ok=True)
+
+    cmd = (
+        f'sudo docker run --rm '
+        f'-v "/etc/letsencrypt:/etc/letsencrypt" '
+        f'-v "{webroot}:/var/www/html" '
+        f'certbot/certbot certonly --webroot -w /var/www/html '
+        f'-d {domain} -d www.{domain} '
+        f'--agree-tos --non-interactive '
+    )
+    if email:
+        cmd += f'-m "{email}" '
+    else:
+        cmd += "--register-unsafely-without-email "
+
+    run_with_spinner(cmd, label=f"Issuing Let's Encrypt cert for {domain}", check=True)
+
+
+def setup_tls_for_existing_stack():
+    compose_path = Path("docker-compose.yml")
+    if not compose_path.exists():
+        msg = "docker-compose.yml not found. Run profile 'php' or 'static' first."
+        log(msg)
+        print("ERROR:", msg)
+        sys.exit(1)
+
+    noninteractive = os.environ.get("NONINTERACTIVE", "").lower() in ("1", "true", "yes")
+
+    if noninteractive:
+        domain = os.environ.get("DOMAIN", "").strip()
+        email = os.environ.get("EMAIL", "").strip()
+        if not domain:
+            msg = "NONINTERACTIVE TLS requires DOMAIN environment variable."
+            log(msg)
+            print("ERROR:", msg)
+            sys.exit(1)
+        log(f"NONINTERACTIVE TLS for domain={domain} email={email or '(none)'}")
+    else:
+        domain = input("Enter your primary domain (e.g. example.com): ").strip()
+        if not domain:
+            print("Domain cannot be empty.")
+            sys.exit(1)
+        email = input("Enter email for Let's Encrypt (or leave blank to skip): ").strip()
+
+    set_total_steps(3)
+
+    with step("Ensuring Docker is installed and running"):
+        ensure_docker_installed()
+
+    with step(f"Obtaining Let's Encrypt certificate for {domain}"):
+        try:
+            obtain_cert_with_docker(domain, email)
+        except Exception as e:
+            log(f"Certbot (docker) failed: {e}")
+            print("ERROR: Failed to obtain certificate. Check provision.log for details.")
+            sys.exit(1)
+
+    with step("Writing HTTPS nginx config and restarting nginx"):
+        stack_type = "php"
+        try:
+            stack_type = detect_stack_type_from_compose()
+        except Exception as e:
+            log("Could not detect stack type from compose: " + str(e))
+
+        if stack_type != "php":
+            msg = "TLS helper currently fully tested for PHP stack only. Detected non-PHP stack."
+            log(msg)
+            print("ERROR:", msg)
+            sys.exit(1)
+
+        conf = generate_tls_nginx_conf(domain, php_stack=True)
+        write_file("nginx/conf.d/default.conf", conf)
+        run_with_spinner(
+            "sudo docker-compose restart nginx",
+            label="Restarting nginx with new TLS config",
+            check=False,
+        )
+        log("Nginx restarted with HTTPS configuration.")
+
+    log("TLS configuration complete.")
+
+
+# ---------- Main ----------
 
 def main():
     try:
@@ -677,15 +751,22 @@ def main():
 
         profile = choose_profile()
 
+        # TLS-only path (Option 6)
+        if profile == "tls":
+            setup_tls_for_existing_stack()
+            log("Provisioning complete (TLS).")
+            log("Log file: " + str(LOGFILE.absolute()))
+            return
+
+        # Only php/static are implemented as full stacks right now
         if profile not in ("php", "static"):
-            log(f"Profile '{profile}' is not implemented yet. Please use 'php' or 'static' for now.")
-            print(f"Profile '{profile}' is not implemented yet. Please use 'php' or 'static' for now.")
+            log(f"Profile '{profile}' is not implemented yet. Please use 'php', 'static' or 'tls' for now.")
+            print(f"Profile '{profile}' is not implemented yet. Please use 'php', 'static' or 'tls' for now.")
             sys.exit(1)
 
-        # plan steps
         if profile == "php":
             set_total_steps(4)
-        else:  # static
+        else:
             set_total_steps(3)
 
         with step("Ensuring Docker is installed and running"):
@@ -695,12 +776,11 @@ def main():
             safe_mkdir("www")
             safe_mkdir("nginx/conf.d")
 
-            # env and credentials (php profile uses them; static profile might not, but harmless)
             if profile == "php":
+                # Ensure .env with passwords
                 if not Path(".env").exists():
                     safe_write_dotenv()
                 else:
-                    # re-ensure perms
                     data = {}
                     for ln in Path(".env").read_text().splitlines():
                         if "=" in ln:
@@ -715,7 +795,7 @@ def main():
                 write_index_php()
                 write_nginx_conf_php()
                 compose_text = generate_php_compose(arch)
-            else:  # static
+            else:
                 write_index_static()
                 write_nginx_conf_static()
                 compose_text = generate_static_compose()
@@ -739,6 +819,7 @@ def main():
         if profile == "php":
             log("Secure README: " + str(Path("README_SECURE.txt").absolute()))
         log("Log file: " + str(LOGFILE.absolute()))
+
     except KeyboardInterrupt:
         log("Provisioner interrupted by user (Ctrl+C).")
         sys.exit(1)
