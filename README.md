@@ -56,8 +56,9 @@ PHP stack (nginx + PHP + MariaDB + Adminer/phpMyAdmin)
 ```bash
 mkdir -p ~/app && \
 curl -L https://github.com/aj-techsoul/QuickAWS/archive/refs/heads/main.tar.gz \
-  | tar xz --strip-components=1 -C ~/app && \
-cd ~/app && chmod +x provision.py && \
+| tar xz --strip-components=1 -C ~/app && \
+cd ~/app && \
+chmod +x provision.py && \
 NONINTERACTIVE=1 PROFILE=php python3 provision.py 2>&1 | tee provision_run.log
 ```
 Static-only nginx (no PHP / DB)
